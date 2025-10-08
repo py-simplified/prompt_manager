@@ -22,12 +22,21 @@ pip install -r requirements.txt
 ### Environment Variables
 Copy `.env.example` to `.env` and fill in the values you need:
 ```
-OPENAI_API_KEY=your-openai-api-key
+cp .env.example .env  # (Windows PowerShell: Copy-Item .env.example .env)
+```
+Then edit `.env` (never commit it):
+```
+OPENAI_API_KEY=sk-your-openai-api-key
 INTERNAL_ACCESS_TOKEN=your-internal-access-token
 INTERNAL_CHAT_URL=https://internal-chat-endpoint.example.com
 ```
 
 `OPENAI_API_KEY` is used automatically when you select the OpenAI provider unless you enter a key in the UI. The internal credential values are convenience references; you can also paste them directly into the sidebar inputs.
+
+Security notes:
+- `.env` is git-ignored; only `.env.example` is tracked.
+- Rotate any key that was ever committed historically.
+- Consider adding a pre-commit hook to block committing `.env` or keys (ask if you want an example script added).
 
 ### Run the App
 ```bash
