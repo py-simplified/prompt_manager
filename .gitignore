@@ -1,8 +1,0 @@
-# Environment variables (all .env files except the example template)
-.env
-*.env
-!.env.example
-
-# Python cache artifacts
-__pycache__/
-*.py[cod]
