@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import os
+from io import BytesIO
+from typing import Dict, List, Tuple
+from zipfile import ZipFile
+
+import streamlit as st
+from dotenv import load_dotenv
+
+from chat_connectivity import chat_complete
+from utils.docx_utils import create_docx
+from utils.file_utils import read_prompts, read_requirement
+from utils.pdf_utils import create_pdf
+
+load_dotenv()
+
+st.set_page_config(page_title="Prompt Document Generator", layout="wide")
+if "generation_results" not in st.session_state:
+    st.session_state["generation_results"] = []
+if "failed_requirements" not in st.session_state:
+    st.session_state["failed_requirements"] = []
+if "zip_bundle" not in st.session_state:
+    st.session_state["zip_bundle"] = b""
+
+st.title("Prompt Document Generator")
+st.markdown(
+    "Upload one or more requirement documents alongside a prompt template file to generate structured outputs. "
+    "Each prompt will be executed with every requirement to create the final documents."
+)
+
+with st.sidebar:
+    st.header("Generation Settings")
+    provider = st.radio("Provider", options=["openai", "internal"], index=0)
+    max_tokens = st.number_input("Max tokens", min_value=100, max_value=2000, value=800, step=50)
+
+    if provider == "openai":
+        model_name = st.text_input("Model name", value="gpt-3.5-turbo", key="openai_model")
+        st.caption("Leave the API key blank to use the OPENAI_API_KEY value from your environment.")
+        openai_key_input = st.text_input("OpenAI API Key", type="password", key="openai_api_key")
+        internal_token = ""
+        internal_endpoint = ""
+    else:
+        model_name = st.text_input("Model name", value="doc-gen-model", key="internal_model")
+        internal_token = st.text_input("AP Token", type="password", key="internal_token")
+        internal_endpoint = st.text_input("Internal Endpoint URL", key="internal_endpoint")
+        openai_key_input = ""
+
+req_files = st.file_uploader(
+    "Upload requirements",
+    type=["txt", "pdf", "docx"],
+    accept_multiple_files=True,
+)
+prompt_file = st.file_uploader(
+    "Prompt definitions (.csv or .xlsx with Artifact and Prompt columns)",
+    type=["csv", "xlsx"],
+    accept_multiple_files=False,
+)
+
+generate_clicked = st.button("Generate Outputs", disabled=not req_files or not prompt_file)
+
+batch_outputs: List[Dict[str, object]] = list(st.session_state.get("generation_results", []))
+failed_requirements: List[Tuple[str, str]] = list(st.session_state.get("failed_requirements", []))
+zip_bundle: bytes = st.session_state.get("zip_bundle", b"")
+
+if generate_clicked:
+    requirement_files = list(req_files or [])
+    if not requirement_files:
+        st.error("Please upload at least one requirement document before generating outputs.")
+    elif not prompt_file:
+        st.error("Please upload a prompt file before generating outputs.")
+    else:
+        try:
+            prompts_df = read_prompts(prompt_file)
+        except ValueError as exc:
+            st.error(str(exc))
+            st.stop()
+
+        if prompts_df.empty:
+            st.warning("The prompt file is empty. Add at least one prompt to continue.")
+            st.stop()
+
+        provider_kwargs = {"model": model_name}
+        if provider == "openai":
+            api_key = openai_key_input.strip() or os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                st.error("Please provide an OpenAI API key via the input field or environment variable.")
+                st.stop()
+            provider_kwargs["api_key"] = api_key
+        else:
+            if not internal_token:
+                st.error("Please provide an AP Token for the internal provider.")
+                st.stop()
+            if not internal_endpoint:
+                st.error("Please provide the Internal Endpoint URL for the internal provider.")
+                st.stop()
+            provider_kwargs["access_token"] = internal_token
+            provider_kwargs["endpoint_url"] = internal_endpoint
+
+        successful_outputs: List[Dict[str, object]] = []
+        failed_outputs: List[Tuple[str, str]] = []
+        filename_tracker: Dict[str, int] = {}
+
+        with st.spinner("Generating content..."):
+            for requirement_file in requirement_files:
+                raw_name = getattr(requirement_file, "name", "") or getattr(requirement_file, "filename", "")
+                display_name = raw_name or "Requirement"
+
+                try:
+                    requirement_text = read_requirement(requirement_file)
+                except ValueError as exc:
+                    failed_outputs.append((display_name, str(exc)))
+                    continue
+
+                per_prompt_results: List[Tuple[str, str]] = []
+                try:
+                    for row in prompts_df.itertuples(index=False):
+                        artifact = str(row.Artifact)
+                        prompt_template = str(row.Prompt)
+                        composed_prompt = f"{prompt_template}\n\nRequirement:\n{requirement_text}"
+                        response_text = chat_complete(
+                            provider=provider,
+                            prompt=composed_prompt,
+                            max_tokens=max_tokens,
+                            user_id="DocGenUser",
+                            **provider_kwargs,
+                        )
+                        per_prompt_results.append((artifact, response_text.strip()))
+                except Exception as exc:  # pragma: no cover - surfaced to user
+                    failed_outputs.append((display_name, str(exc)))
+                    continue
+
+                base_name = os.path.splitext(os.path.basename(display_name))[0] or "requirement"
+                collision_count = filename_tracker.get(base_name, 0)
+                filename_tracker[base_name] = collision_count + 1
+                export_base = base_name if collision_count == 0 else f"{base_name}_{collision_count}"
+
+                docx_document = create_docx(per_prompt_results)
+                docx_buffer = BytesIO()
+                docx_document.save(docx_buffer)
+                docx_bytes = docx_buffer.getvalue()
+
+                pdf_buffer = BytesIO()
+                create_pdf(per_prompt_results, pdf_buffer)
+                pdf_bytes = pdf_buffer.getvalue()
+
+                successful_outputs.append(
+                    {
+                        "requirement_name": display_name,
+                        "results": per_prompt_results,
+                        "docx_bytes": docx_bytes,
+                        "pdf_bytes": pdf_bytes,
+                        "docx_filename": f"{export_base}.docx",
+                        "pdf_filename": f"{export_base}.pdf",
+                    }
+                )
+
+        zip_bytes = b""
+        if successful_outputs:
+            zip_buffer = BytesIO()
+            with ZipFile(zip_buffer, "w") as zip_archive:
+                for output in successful_outputs:
+                    zip_archive.writestr(output["docx_filename"], output["docx_bytes"])
+                    zip_archive.writestr(output["pdf_filename"], output["pdf_bytes"])
+            zip_bytes = zip_buffer.getvalue()
+
+        st.session_state["generation_results"] = successful_outputs
+        st.session_state["failed_requirements"] = failed_outputs
+        st.session_state["zip_bundle"] = zip_bytes
+
+        batch_outputs = successful_outputs
+        failed_requirements = failed_outputs
+        zip_bundle = zip_bytes
+
+        if successful_outputs and failed_outputs:
+            st.warning("Some requirement files could not be processed. See warnings below.")
+        elif not successful_outputs and failed_outputs:
+            st.error("No requirement files were processed successfully. See warnings below.")
+        elif successful_outputs:
+            st.success("Generation complete.")
+
+if failed_requirements:
+    for requirement_name, error_message in failed_requirements:
+        st.warning(f"Failed to process '{requirement_name}': {error_message}")
+
+if batch_outputs:
+    for output in batch_outputs:
+        requirement_name = str(output.get("requirement_name", "Requirement"))
+        with st.expander(requirement_name, expanded=False):
+            for artifact, content in output.get("results", []):
+                st.subheader(artifact)
+                st.markdown(content or "_No content returned._")
+
+            col_docx, col_pdf = st.columns(2)
+            with col_docx:
+                st.download_button(
+                    "Download DOCX",
+                    data=output.get("docx_bytes", b""),
+                    file_name=str(output.get("docx_filename", "requirement.docx")),
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    data=output.get("pdf_bytes", b""),
+                    file_name=str(output.get("pdf_filename", "requirement.pdf")),
+                    mime="application/pdf",
+                )
+
+if zip_bundle:
+    st.download_button(
+        "Download All (ZIP)",
+        data=zip_bundle,
+        file_name="All_Results.zip",
+        mime="application/zip",
+    )

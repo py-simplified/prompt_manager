@@ -1,0 +1,4 @@
+Artifact,Prompt
+Requirement Summary,"Provide a concise summary of the key points in the requirement."
+User Stories,"Generate user stories in the format ""As a <user>, I want <goal> so that <benefit>"" based on the requirement."
+Test Cases,"Produce test cases in a Markdown table with columns ""Test Case ID"", ""Test Case Step"", and ""Expected Results"" that cover the requirement's acceptance criteria."
