@@ -1,4 +1,0 @@
-The application shall allow users to submit support tickets with attachments.
-Each ticket must capture the user's contact details and categorize the issue severity.
-Administrators need a dashboard to triage tickets, assign owners, and update status.
-Email notifications should be sent when tickets are created, updated, or resolved.
